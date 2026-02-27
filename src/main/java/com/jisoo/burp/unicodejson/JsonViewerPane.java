@@ -3,6 +3,7 @@ package com.jisoo.burp.unicodejson;
 import burp.api.montoya.MontoyaApi;
 
 import javax.swing.JScrollPane;
+import javax.swing.JScrollBar;
 import javax.swing.JTextPane;
 import javax.swing.UIManager;
 import javax.swing.text.DefaultStyledDocument;
@@ -12,6 +13,7 @@ import javax.swing.text.StyledDocument;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Font;
+import java.awt.event.MouseWheelEvent;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -21,9 +23,11 @@ final class JsonViewerPane {
     private static final Pattern STRING_PATTERN = Pattern.compile("\"(?:\\\\.|[^\"\\\\])*\"");
     private static final Pattern KEYWORD_PATTERN = Pattern.compile("\\b(?:true|false|null)\\b");
     private static final Pattern NUMBER_PATTERN = Pattern.compile("-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?");
+    private static final int WHEEL_BASE_PIXELS = 28;
+    private static final int WHEEL_MAX_PIXELS = 96;
 
     private final JTextPane textPane = new JTextPane();
-    private final JScrollPane scrollPane = new JScrollPane(textPane);
+    private final SmoothScrollPane scrollPane = new SmoothScrollPane(textPane);
     private final Style baseStyle;
     private final Style keyStyle;
     private final Style stringStyle;
@@ -34,6 +38,7 @@ final class JsonViewerPane {
         textPane.setEditable(false);
         textPane.setDocument(new DefaultStyledDocument());
         api.userInterface().applyThemeToComponent(scrollPane);
+        configureScrollBehavior();
 
         Font editorFont = api.userInterface().currentEditorFont();
         if (editorFont != null) {
@@ -187,6 +192,66 @@ final class JsonViewerPane {
     private static boolean isDarkColor(Color color) {
         int luminance = (int) (0.299 * color.getRed() + 0.587 * color.getGreen() + 0.114 * color.getBlue());
         return luminance < 128;
+    }
+
+    private void configureScrollBehavior() {
+        JScrollBar verticalBar = scrollPane.getVerticalScrollBar();
+        verticalBar.setUnitIncrement(16);
+        verticalBar.setBlockIncrement(96);
+    }
+
+    private static int clamp(int value, int min, int max) {
+        if (value < min) {
+            return min;
+        }
+        if (value > max) {
+            return max;
+        }
+        return value;
+    }
+
+    private static final class SmoothScrollPane extends JScrollPane {
+        private double wheelRemainder;
+
+        private SmoothScrollPane(JTextPane view) {
+            super(view);
+        }
+
+        @Override
+        protected void processMouseWheelEvent(MouseWheelEvent event) {
+            if (event.isConsumed() || event.isControlDown() || event.isShiftDown()) {
+                super.processMouseWheelEvent(event);
+                return;
+            }
+
+            JScrollBar bar = getVerticalScrollBar();
+            if (bar == null || !bar.isVisible()) {
+                super.processMouseWheelEvent(event);
+                return;
+            }
+
+            double preciseRotation = event.getPreciseWheelRotation();
+            if (preciseRotation == 0.0d) {
+                event.consume();
+                return;
+            }
+
+            double rawDelta = (preciseRotation * WHEEL_BASE_PIXELS) + wheelRemainder;
+            int deltaPixels = (int) rawDelta;
+            wheelRemainder = rawDelta - deltaPixels;
+
+            if (deltaPixels == 0) {
+                event.consume();
+                return;
+            }
+
+            deltaPixels = clamp(deltaPixels, -WHEEL_MAX_PIXELS, WHEEL_MAX_PIXELS);
+            int min = bar.getMinimum();
+            int max = bar.getMaximum() - bar.getVisibleAmount();
+            int target = clamp(bar.getValue() + deltaPixels, min, max);
+            bar.setValue(target);
+            event.consume();
+        }
     }
 
     private record Range(int start, int end) {
