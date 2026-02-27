@@ -12,6 +12,10 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 
+import java.nio.charset.Charset;
+import java.nio.charset.IllegalCharsetNameException;
+import java.nio.charset.StandardCharsets;
+import java.nio.charset.UnsupportedCharsetException;
 import java.util.Locale;
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -29,7 +33,10 @@ final class MessageTransformer {
         }
 
         MessageEnvelope envelope = splitHeadAndBody(request.toString());
-        String transformedBody = transformBodyForDisplay(request.bodyToString(), request.headerValue("Content-Type"));
+        String transformedBody = transformBodyForDisplay(
+                request.body().getBytes(),
+                request.bodyToString(),
+                request.headerValue("Content-Type"));
         return renderEnvelope(envelope, transformedBody);
     }
 
@@ -39,8 +46,16 @@ final class MessageTransformer {
         }
 
         MessageEnvelope envelope = splitHeadAndBody(response.toString());
-        String transformedBody = transformBodyForDisplay(response.bodyToString(), response.headerValue("Content-Type"));
+        String transformedBody = transformBodyForDisplay(
+                response.body().getBytes(),
+                response.bodyToString(),
+                response.headerValue("Content-Type"));
         return renderEnvelope(envelope, transformedBody);
+    }
+
+    String transformBodyForDisplay(byte[] bodyBytes, String bodyToString, String contentType) {
+        String safeBody = decodeBodyByContentType(bodyBytes, bodyToString, contentType);
+        return transformBodyForDisplay(safeBody, contentType);
     }
 
     String transformBodyForDisplay(String body, String contentType) {
@@ -140,14 +155,50 @@ final class MessageTransformer {
         return new MessageEnvelope(safeRaw, "");
     }
 
+    String decodeBodyByContentType(byte[] bodyBytes, String bodyToString, String contentType) {
+        String fallback = bodyToString == null ? "" : bodyToString;
+        if (bodyBytes == null || bodyBytes.length == 0) {
+            return fallback;
+        }
+
+        Charset charset = resolveCharset(contentType);
+        if (charset == null && isJsonContentType(contentType)) {
+            charset = StandardCharsets.UTF_8;
+        }
+        if (charset == null) {
+            return fallback;
+        }
+
+        String decodedCandidate;
+        try {
+            decodedCandidate = new String(bodyBytes, charset);
+        } catch (RuntimeException ignored) {
+            return fallback;
+        }
+
+        if (!isJsonContentType(contentType)) {
+            return decodedCandidate;
+        }
+
+        JsonNode fallbackJson = parseJson(fallback);
+        JsonNode decodedJson = parseJson(decodedCandidate);
+
+        if (decodedJson != null && fallbackJson == null) {
+            return decodedCandidate;
+        }
+        if (decodedJson == null && fallbackJson != null) {
+            return fallback;
+        }
+        if (decodedJson == null) {
+            return fallback;
+        }
+
+        return shouldPreferDecodedText(fallback, decodedCandidate) ? decodedCandidate : fallback;
+    }
+
     private boolean looksLikeJson(String contentType, String body) {
-        if (contentType != null) {
-            String ctLower = contentType.toLowerCase(Locale.ROOT);
-            if (ctLower.contains("application/json")
-                    || ctLower.contains("+json")
-                    || ctLower.contains("text/json")) {
-                return true;
-            }
+        if (isJsonContentType(contentType)) {
+            return true;
         }
 
         String trimmed = body.trim();
@@ -156,6 +207,74 @@ final class MessageTransformer {
         }
         return (trimmed.charAt(0) == '{' && trimmed.charAt(trimmed.length() - 1) == '}')
                 || (trimmed.charAt(0) == '[' && trimmed.charAt(trimmed.length() - 1) == ']');
+    }
+
+    private boolean isJsonContentType(String contentType) {
+        if (contentType == null) {
+            return false;
+        }
+        String ctLower = contentType.toLowerCase(Locale.ROOT);
+        return ctLower.contains("application/json")
+                || ctLower.contains("+json")
+                || ctLower.contains("text/json");
+    }
+
+    private Charset resolveCharset(String contentType) {
+        if (contentType == null || contentType.isBlank()) {
+            return null;
+        }
+
+        String[] tokens = contentType.split(";");
+        for (int i = 1; i < tokens.length; i++) {
+            String token = tokens[i].trim();
+            int equalsIndex = token.indexOf('=');
+            if (equalsIndex < 0) {
+                continue;
+            }
+
+            String name = token.substring(0, equalsIndex).trim();
+            if (!"charset".equalsIgnoreCase(name)) {
+                continue;
+            }
+
+            String value = token.substring(equalsIndex + 1).trim();
+            if (value.length() >= 2
+                    && ((value.startsWith("\"") && value.endsWith("\""))
+                    || (value.startsWith("'") && value.endsWith("'")))) {
+                value = value.substring(1, value.length() - 1).trim();
+            }
+            if (value.isEmpty()) {
+                return null;
+            }
+
+            try {
+                return Charset.forName(value);
+            } catch (IllegalCharsetNameException | UnsupportedCharsetException ignored) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private boolean shouldPreferDecodedText(String fallback, String decodedCandidate) {
+        if (decodedCandidate.equals(fallback)) {
+            return false;
+        }
+
+        int fallbackChinese = chineseCodePointCount(fallback);
+        int decodedChinese = chineseCodePointCount(decodedCandidate);
+        if (decodedChinese > fallbackChinese) {
+            return true;
+        }
+
+        boolean fallbackControl = hasLatin1ControlChars(fallback);
+        boolean decodedControl = hasLatin1ControlChars(decodedCandidate);
+        if (fallbackControl && !decodedControl) {
+            return true;
+        }
+
+        return false;
     }
 
     private JsonNode normalize(JsonNode node) {
@@ -242,6 +361,36 @@ final class MessageTransformer {
                 || (codePoint >= 0x4E00 && codePoint <= 0x9FFF)
                 || (codePoint >= 0xF900 && codePoint <= 0xFAFF)
                 || (codePoint >= 0x3000 && codePoint <= 0x303F);
+    }
+
+    private static int chineseCodePointCount(String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+
+        int count = 0;
+        for (int index = 0; index < text.length(); ) {
+            int codePoint = text.codePointAt(index);
+            if (isChineseCodePoint(codePoint)) {
+                count++;
+            }
+            index += Character.charCount(codePoint);
+        }
+        return count;
+    }
+
+    private static boolean hasLatin1ControlChars(String text) {
+        if (text == null || text.isEmpty()) {
+            return false;
+        }
+
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (ch >= 0x0080 && ch <= 0x009F) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static int hexValue(char c) {
