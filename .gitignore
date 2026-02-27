@@ -1,0 +1,10 @@
+# Maven build output
+target/
+
+# Maven local repo cache in project
+.m2/
+
+# OS/editor
+.DS_Store
+.idea/
+*.iml
