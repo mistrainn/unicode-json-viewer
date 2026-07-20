@@ -25,7 +25,7 @@ mvn clean package
 ```
 
 打包后 Jar 位于：
-- `target/unicode-json-viewer-1.0.0.jar`
+- `target/unicode-json-viewer-1.1.0.jar`
 
 ## 在 Burp 中加载
 1. 打开 Burp Suite。

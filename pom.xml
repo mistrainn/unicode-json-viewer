@@ -6,7 +6,7 @@
 
     <groupId>com.jisoo.burp</groupId>
     <artifactId>unicode-json-viewer</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
     <name>Unicode JSON Viewer</name>
     <description>Burp Suite Montoya extension for Unicode decoding and nested JSON formatting.</description>
 
