@@ -17,9 +17,8 @@ import java.nio.charset.IllegalCharsetNameException;
 import java.nio.charset.StandardCharsets;
 import java.nio.charset.UnsupportedCharsetException;
 import java.util.Locale;
-import java.util.ArrayList;
 import java.util.Iterator;
-import java.util.List;
+import java.util.Map;
 
 final class MessageTransformer {
     private static final String CRLF_CRLF = "\r\n\r\n";
@@ -104,31 +103,47 @@ final class MessageTransformer {
             }
             int slashCount = index - slashStart;
 
-            if (index + 4 < input.length()
-                    && input.charAt(index) == 'u'
-                    && slashCount % 2 == 1
-                    && isHexSequence(input, index + 1)) {
-                int codePoint = parseHex4(input, index + 1);
+            // Only an odd number of backslashes forms a real escape; the char after
+            // the run now sits at `index`.
+            if (slashCount % 2 == 1 && isUnicodeEscapeAt(input, index)) {
+                int firstUnit = parseHex4(input, index + 1);
+                int consumed = 5;
+                int codePoint = firstUnit;
+
+                // Combine a UTF-16 surrogate pair so supplementary CJK (e.g. Ext B) decodes.
+                if (Character.isHighSurrogate((char) firstUnit)
+                        && isUnicodeEscapeAt(input, index + 5)) {
+                    int secondUnit = parseHex4(input, index + 6);
+                    if (Character.isLowSurrogate((char) secondUnit)) {
+                        codePoint = Character.toCodePoint((char) firstUnit, (char) secondUnit);
+                        consumed = 10;
+                    }
+                }
+
                 if (isChineseCodePoint(codePoint)) {
-                    for (int i = 0; i < slashCount / 2; i++) {
-                        output.append('\\');
-                    }
-                    output.append((char) codePoint);
+                    appendBackslashes(output, slashCount / 2);
+                    output.appendCodePoint(codePoint);
                 } else {
-                    for (int i = 0; i < slashCount; i++) {
-                        output.append('\\');
-                    }
-                    output.append('u').append(input, index + 1, index + 5);
+                    appendBackslashes(output, slashCount);
+                    output.append(input, index, index + consumed);
                 }
-                index += 5;
+                index += consumed;
             } else {
-                for (int i = 0; i < slashCount; i++) {
-                    output.append('\\');
-                }
+                appendBackslashes(output, slashCount);
             }
         }
 
         return output.toString();
+    }
+
+    private static void appendBackslashes(StringBuilder output, int count) {
+        for (int i = 0; i < count; i++) {
+            output.append('\\');
+        }
+    }
+
+    private static boolean isUnicodeEscapeAt(String input, int pos) {
+        return pos >= 0 && pos < input.length() && input.charAt(pos) == 'u' && isHexSequence(input, pos + 1);
     }
 
     private String renderEnvelope(MessageEnvelope envelope, String transformedBody) {
@@ -279,24 +294,21 @@ final class MessageTransformer {
 
     private JsonNode normalize(JsonNode node) {
         if (node.isObject()) {
-            ObjectNode objectNode = (ObjectNode) node.deepCopy();
-            Iterator<String> iterator = objectNode.fieldNames();
-            List<String> fields = new ArrayList<>();
-            while (iterator.hasNext()) {
-                fields.add(iterator.next());
+            ObjectNode result = objectMapper.createObjectNode();
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                result.set(entry.getKey(), normalize(entry.getValue()));
             }
-            for (String field : fields) {
-                objectNode.set(field, normalize(objectNode.get(field)));
-            }
-            return objectNode;
+            return result;
         }
 
         if (node.isArray()) {
-            ArrayNode arrayNode = (ArrayNode) node.deepCopy();
-            for (int i = 0; i < arrayNode.size(); i++) {
-                arrayNode.set(i, normalize(arrayNode.get(i)));
+            ArrayNode result = objectMapper.createArrayNode();
+            for (JsonNode child : node) {
+                result.add(normalize(child));
             }
-            return arrayNode;
+            return result;
         }
 
         if (node.isTextual()) {
@@ -357,10 +369,14 @@ final class MessageTransformer {
     }
 
     private static boolean isChineseCodePoint(int codePoint) {
-        return (codePoint >= 0x3400 && codePoint <= 0x4DBF)
-                || (codePoint >= 0x4E00 && codePoint <= 0x9FFF)
-                || (codePoint >= 0xF900 && codePoint <= 0xFAFF)
-                || (codePoint >= 0x3000 && codePoint <= 0x303F);
+        return (codePoint >= 0x3000 && codePoint <= 0x303F)   // CJK symbols and punctuation
+                || (codePoint >= 0x3400 && codePoint <= 0x4DBF)   // CJK Extension A
+                || (codePoint >= 0x4E00 && codePoint <= 0x9FFF)   // CJK Unified Ideographs
+                || (codePoint >= 0xF900 && codePoint <= 0xFAFF)   // CJK Compatibility Ideographs
+                || (codePoint >= 0x20000 && codePoint <= 0x2A6DF) // CJK Extension B
+                || (codePoint >= 0x2A700 && codePoint <= 0x2EBEF) // CJK Extension C-F
+                || (codePoint >= 0x2F800 && codePoint <= 0x2FA1F) // CJK Compatibility Supplement
+                || (codePoint >= 0x30000 && codePoint <= 0x3134F); // CJK Extension G
     }
 
     private static int chineseCodePointCount(String text) {

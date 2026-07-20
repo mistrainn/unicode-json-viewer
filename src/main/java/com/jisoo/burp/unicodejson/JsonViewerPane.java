@@ -5,6 +5,7 @@ import burp.api.montoya.MontoyaApi;
 import javax.swing.JScrollPane;
 import javax.swing.JScrollBar;
 import javax.swing.JTextPane;
+import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
 import javax.swing.text.DefaultStyledDocument;
 import javax.swing.text.Style;
@@ -25,6 +26,8 @@ final class JsonViewerPane {
     private static final Pattern NUMBER_PATTERN = Pattern.compile("-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?");
     private static final int WHEEL_BASE_PIXELS = 28;
     private static final int WHEEL_MAX_PIXELS = 96;
+    // Regex-based highlighting is O(n*m); skip it for very large bodies to keep the UI responsive.
+    private static final int MAX_HIGHLIGHT_CHARS = 300_000;
 
     private final JTextPane textPane = new JTextPane();
     private final SmoothScrollPane scrollPane = new SmoothScrollPane(textPane);
@@ -35,7 +38,7 @@ final class JsonViewerPane {
     private final Style keywordStyle;
 
     JsonViewerPane(MontoyaApi api) {
-        textPane.setEditable(false);
+        textPane.setEditable(true);
         textPane.setDocument(new DefaultStyledDocument());
         api.userInterface().applyThemeToComponent(scrollPane);
         configureScrollBehavior();
@@ -74,6 +77,14 @@ final class JsonViewerPane {
 
     void setContent(String text) {
         String safeText = text == null ? "" : normalizeLineSeparators(text);
+        if (SwingUtilities.isEventDispatchThread()) {
+            applyContent(safeText);
+        } else {
+            SwingUtilities.invokeLater(() -> applyContent(safeText));
+        }
+    }
+
+    private void applyContent(String safeText) {
         textPane.setText(safeText);
         highlightJsonIfPossible(safeText);
         textPane.setCaretPosition(0);
@@ -82,6 +93,10 @@ final class JsonViewerPane {
     private void highlightJsonIfPossible(String text) {
         StyledDocument document = textPane.getStyledDocument();
         document.setCharacterAttributes(0, text.length(), baseStyle, true);
+
+        if (text.length() > MAX_HIGHLIGHT_CHARS) {
+            return;
+        }
 
         if (isLikelyJson(text)) {
             applyJsonHighlight(document, text, 0);
@@ -174,15 +189,9 @@ final class JsonViewerPane {
         if (text == null || text.isEmpty()) {
             return -1;
         }
-        int crlf = text.indexOf("\r\n\r\n");
-        if (crlf >= 0) {
-            return crlf + 4;
-        }
+        // Line separators are normalized to '\n' before highlighting, so only "\n\n" occurs here.
         int lf = text.indexOf("\n\n");
-        if (lf >= 0) {
-            return lf + 2;
-        }
-        return -1;
+        return lf >= 0 ? lf + 2 : -1;
     }
 
     private static String normalizeLineSeparators(String input) {
